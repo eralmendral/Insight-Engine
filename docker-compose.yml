@@ -1,11 +1,8 @@
-version: '3.8'
 services:
   insight-engine:
     build: .
     ports:
       - "8501:8501"
+    env_file: .env                  # Inject API Keys
     volumes:
       - ./chroma_db:/app/chroma_db  # Persist vector DB on host
-      - ./.env:/app/.env            # Inject API Keys
-    environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY}

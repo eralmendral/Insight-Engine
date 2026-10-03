@@ -1,0 +1,3 @@
+[server]
+# Caps PDF uploads (MB) to bound embedding costs on the public demo.
+maxUploadSize = 25

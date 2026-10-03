@@ -1,22 +1,39 @@
-import streamlit as st
-import tempfile
 import os
-import shutil
-from rag_engine import InsightEngine
+import tempfile
+import uuid
 
-# BRIDGE: If running on Streamlit Cloud, map secrets to env vars for LangChain
-if "OPENAI_API_KEY" in st.secrets:
-    os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+import streamlit as st
+
+from rag_engine import InsightEngine, source_label
 
 # Page Config for a professional look
 st.set_page_config(page_title="InsightEngine | AI Engineering Portfolio", layout="wide")
 
+# Streamlit exports root-level secrets as env vars, so this covers both
+# a local .env and Streamlit Cloud secrets.
+if not os.getenv("OPENAI_API_KEY"):
+    st.error("OPENAI_API_KEY is not set. Add it to `.env` (local) or the app's secrets (Streamlit Cloud).")
+    st.stop()
+
 # 1. Initialize the Engine in Session State
-# This ensures we don't re-instantiate the model/db on every rerun
+# This ensures we don't re-instantiate the model/db on every rerun.
+# Each browser session gets its own collection, so visitors to the public demo
+# never see (or wipe) each other's documents.
 if "engine" not in st.session_state:
-    st.session_state.engine = InsightEngine()
+    st.session_state.engine = InsightEngine(collection_name=f"session-{uuid.uuid4().hex}")
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
+
+engine = st.session_state.engine
+
+
+def render_sources(sources):
+    """Shows the (label, excerpt) pairs that the answer's [n] citations point to."""
+    with st.expander("📚 View Source Documents"):
+        for i, (label, excerpt) in enumerate(sources, start=1):
+            st.markdown(f"**[{i}]** {label}")
+            st.caption(excerpt)
+
 
 st.title("InsightEngine")
 st.markdown("---")
@@ -25,43 +42,29 @@ st.markdown("---")
 with st.sidebar:
     st.header("Document Ingestion")
     uploaded_file = st.file_uploader("Upload PDF Knowledge Base", type="pdf")
-    
+
     if st.button("Ingest & Vectorize"):
-        if uploaded_file:
+        if not uploaded_file:
+            st.warning("Choose a PDF first.")
+        else:
             with st.spinner("Processing PDF..."):
-                # Streamlit's UploadedFile is a BytesIO object. 
+                # Streamlit's UploadedFile is a BytesIO object.
                 # PyPDFLoader requires a file path, so we use a temp file.
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                     tmp.write(uploaded_file.getvalue())
-                    tmp_path = tmp.name
-                
-                success = st.session_state.engine.ingest_document(tmp_path)
-                os.remove(tmp_path) # Clean up
-                
-                if success:
-                    st.success("Knowledge base updated!")
-                else:
-                    st.error("Ingestion failed. Check logs.")
+                try:
+                    chunk_count = engine.ingest_document(tmp.name, source_name=uploaded_file.name)
+                    st.success(f"Added {chunk_count} chunks from {uploaded_file.name}.")
+                except Exception as e:
+                    st.error(f"Ingestion failed: {e}")
+                finally:
+                    os.remove(tmp.name)
+
     st.markdown("---")
     if st.button("⚠️ Reset Knowledge Base"):
-        if os.path.exists("./chroma_db"):
-            # 1. Clear the Vector Store from Memory
-            # (Chroma's client can hold locks, so we try to force a release)
-            st.session_state.engine.vector_store = None
-            del st.session_state.engine
-            
-            # 2. Delete the Directory
-            try:
-                shutil.rmtree("./chroma_db")
-                st.success("Database cleared!")
-                
-                # 3. Refresh the App to Re-initialize
-                st.session_state.clear()
-                st.rerun() 
-            except Exception as e:
-                st.error(f"Error clearing DB: {e}. \nTry stopping the app in terminal.")
-        else:
-            st.info("Database is already empty.")
+        engine.reset()
+        st.session_state.chat_history = []
+        st.success("Knowledge base cleared!")
 
 # 3. Main Chat Interface
 st.subheader("Query the Knowledge Base")
@@ -69,40 +72,36 @@ st.subheader("Query the Knowledge Base")
 # Display conversation history
 for message in st.session_state.chat_history:
     with st.chat_message(message["role"]):
+        if message.get("sources"):
+            render_sources(message["sources"])
         st.markdown(message["content"])
 
 # User Input
 if prompt := st.chat_input("Ask a technical question about the uploaded docs..."):
-    # Add user message to history
+    # Earlier turns only: the new question is passed to the chain separately as {input}.
+    lc_history = [
+        ("human" if msg["role"] == "user" else "ai", msg["content"])
+        for msg in st.session_state.chat_history
+    ]
     st.session_state.chat_history.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     # 4. Retrieval & Generation
     with st.chat_message("assistant"):
-        # 1. Prepare History
-        lc_history = []
-        for msg in st.session_state.chat_history:
-            role = "human" if msg["role"] == "user" else "ai"
-            lc_history.append((role, msg["content"]))
+        sources = []
+        if engine.is_empty():
+            # Skip the API calls entirely: there is nothing to retrieve from.
+            full_response = "Upload a PDF and click **Ingest & Vectorize** first."
+            st.markdown(full_response)
+        else:
+            with st.spinner("Analyzing documents..."):
+                context_docs = engine.retrieve_context(prompt, lc_history)
 
-        # 2. Retrieve Context First (Explicit Step)
-        with st.spinner("Analyzing documents..."):
-            context_docs = st.session_state.engine.retrieve_context(prompt, lc_history)
+            # Show sources before the answer streams, so claims can be checked as they appear.
+            sources = [(source_label(doc), doc.page_content[:300] + "...") for doc in context_docs]
+            render_sources(sources)
+            full_response = st.write_stream(engine.generate_answer(prompt, context_docs, lc_history))
 
-        # 3. Stream Answer
-        response_stream = st.session_state.engine.generate_answer(prompt, context_docs, lc_history)
-        full_response = st.write_stream(response_stream)
-
-        # 4. Display Citations (The Enterprise Feature)
-        with st.expander("📚 View Source Documents"):
-            for i, doc in enumerate(context_docs):
-                source_name = doc.metadata.get("source", "Unknown")
-                page_num = doc.metadata.get("page", "?")
-                st.markdown(f"**Source {i+1}:** {source_name} (Page {page_num})")
-                st.caption(doc.page_content[:300] + "...")  # Preview first 300 chars
-                st.divider()
-
-        # 5. Save to History
-        st.session_state.chat_history.append({"role": "assistant", "content": full_response})
-            
+    # 5. Save to History (sources too, so earlier [n] citations stay resolvable)
+    st.session_state.chat_history.append({"role": "assistant", "content": full_response, "sources": sources})

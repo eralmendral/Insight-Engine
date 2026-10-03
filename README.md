@@ -17,31 +17,35 @@ InsightEngine solves these by implementing a history-aware retrieval chain and f
 
 The application follows a strict "Ingestion -> Retrieval -> Generation" pipeline designed for observability.
 
-[Mermaid Diagram Placeholder - If you view this in a renderer that supports Mermaid]
+```mermaid
 graph LR
     A[PDF Document] -->|PyPDFLoader| B(Raw Text)
     B -->|Recursive Splitter| C(Semantic Chunks)
     C -->|OpenAI Embeddings| D[(ChromaDB)]
-    
-    User[User Query] -->|Contextualize| E{History Aware Chain}
-    E -->|Rewrite Query| D
-    D -->|Retrieve Top K| F[Context Documents]
+
+    User[User Query] -->|Follow-ups only| E{Contextualize}
+    E -->|Standalone Query| D
+    D -->|Retrieve Top K| F[Numbered Sources]
     F -->|Stream| G[LLM Generation]
     G --> User
+```
 
 ## Key Capabilities
 
 ### Context-Aware Memory
-Instead of passing raw chat history to the LLM (which confuses the vector search), the system uses a secondary LLM call to rewrite the user's latest question. 
+Instead of passing raw chat history to the LLM (which confuses the vector search), the system uses a secondary LLM call to rewrite follow-up questions into standalone ones. The first question in a conversation skips this call entirely. 
 * *User:* "How much does it cost?"
 * *System Internal:* "How much does [the payment processing module mentioned previously] cost?"
 * *Result:* The vector database actually finds the right answer.
 
 ### Source Verification (Citations)
-Trust is the biggest bottleneck for AI adoption. This engine decouples the retrieval step from generation. It presents the raw source segments (with page numbers) in an expandable UI component *before* the answer is fully generated, allowing the user to verify the bot's claims immediately.
+Trust is the biggest bottleneck for AI adoption. This engine decouples the retrieval step from generation. Retrieved chunks are numbered and passed to the model, which is instructed to answer only from them and cite them inline (`[1]`, `[2]`). The same numbered sources (file name and page) appear in an expandable panel *before* the answer starts streaming, so every claim can be checked as it appears.
 
 ### Streaming Latency
-Waiting 5+ seconds for a complete answer feels broken. I implemented token-level streaming using Python generators, reducing the Time-To-First-Token (TTFT) to under 500ms, regardless of answer length.
+Waiting 5+ seconds for a complete answer feels broken. Answers stream token by token through Python generators, so text starts appearing as soon as the model produces it, regardless of answer length.
+
+### Isolated Sessions
+Each browser session gets its own vector collection. On the public demo, visitors never see each other's documents, and "Reset Knowledge Base" only clears your own.
 
 ## Getting Started
 
@@ -51,20 +55,32 @@ Waiting 5+ seconds for a complete answer feels broken. I implemented token-level
 * OpenAI API Key
 
 ### Running Locally
-1.  Clone the repo:
-    git clone https://github.com/YOUR_USERNAME/insight-engine.git
-
-2.  Install dependencies:
-    pip install -r requirements.txt
-
-3.  Set your API key in a `.env` file:
-    OPENAI_API_KEY=sk-...
-
-4.  Run the application:
-    streamlit run app.py
+```bash
+git clone https://github.com/eralme/Insight-Engine.git
+cd Insight-Engine
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env   # then put your OpenAI key in .env
+streamlit run app.py
+```
 
 ### Running with Docker
-docker-compose up --build
+```bash
+docker compose up --build
+```
+
+### Running Tests
+The tests use fake models, so they need no API key and make no network calls.
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+### Configuration
+| Variable | Default | Purpose |
+| :--- | :--- | :--- |
+| `OPENAI_API_KEY` | required | Read from `.env` locally or from the app's secrets on Streamlit Cloud. |
+| `OPENAI_MODEL` | `gpt-4-turbo` | Chat model used for rewriting questions and generating answers. |
 
 ## Engineering Decisions
 

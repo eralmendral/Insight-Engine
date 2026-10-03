@@ -1,0 +1,13 @@
+# Keep secrets, local state and the host's virtualenv out of the image.
+.env
+.env.local
+.streamlit/secrets.toml
+venv/
+.venv/
+chroma_db/
+.git/
+.claude/
+__pycache__/
+.pytest_cache/
+tests/
+.DS_Store
