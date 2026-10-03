@@ -56,7 +56,7 @@ Each browser session gets its own vector collection. On the public demo, visitor
 
 ### Running Locally
 ```bash
-git clone https://github.com/eralme/Insight-Engine.git
+git clone https://github.com/eralmendral/Insight-Engine.git
 cd Insight-Engine
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
